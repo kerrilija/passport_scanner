@@ -107,10 +107,10 @@ class _PassportScannerWidgetState extends State<PassportScannerWidget> {
       try {
         final result = MRZParser.parse(mrz);
         if (results.keys.contains(result)) {
-          if (results[result]! < precision) {
+          if (results[result]! < widget.precision) {
             results[result] = results[result]! + 1;
             debugPrint(
-              "MRZ SCANNED SUCCESSFULLY, BUT NEED MORE PRECISION: ${results[result]} / $precision",
+              "MRZ SCANNED SUCCESSFULLY, BUT NEED MORE PRECISION: ${results[result]} / $widget.precision",
             );
           } else {
             debugPrint("MRZ SCANNED SUCCESSFULLY");
