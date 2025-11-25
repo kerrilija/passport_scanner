@@ -5,7 +5,7 @@ import 'package:mrz_parser/mrz_parser.dart';
 import 'ml_kit_utils.dart';
 
 class PassportScannerWidget extends StatefulWidget {
-  final Function(MRZResult result) onScanned;
+  final Function(MRZResult result, String? imagePath) onScanned;
   final Function(List<String> scannedLines)? onParsingFailed;
   final int precision;
 
@@ -115,7 +115,7 @@ class _PassportScannerWidgetState extends State<PassportScannerWidget> {
           } else {
             debugPrint("MRZ SCANNED SUCCESSFULLY");
             _hasScannedSuccessfully = true;
-            widget.onScanned(result);
+            widget.onScanned(result, inputImage.filePath);
           }
         } else {
           results[result] = 1;

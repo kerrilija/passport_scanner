@@ -1,8 +1,13 @@
+## 0.2.0
+
+* Enhance the UI.
+* Return the path of the scanned image.
+
 ## 0.1.0
 
 * First stable release.
 * Added precision (the max number of duplicated scans before assuming that the result is correct).
-* Added onParsingFailed listener
+* Added onParsingFailed listener.
 
 ## 0.0.3
 
