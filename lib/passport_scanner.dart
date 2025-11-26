@@ -120,6 +120,7 @@ class _PassportScannerWidgetState extends State<PassportScannerWidget> {
 
       if (recognizedText.blocks.isEmpty) {
         widget.onNoMrzFound?.call();
+        return;
       };
 
       final block = recognizedText.blocks.last;
