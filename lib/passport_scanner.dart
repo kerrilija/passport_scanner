@@ -12,12 +12,14 @@ class PassportScannerWidget extends StatefulWidget {
   final Function(MRZResult result, String? imagePath) onScanned;
   final Function(List<String> scannedLines)? onParsingFailed;
   final int precision;
+  final bool showFlashButton;
 
   const PassportScannerWidget({
     super.key,
     required this.onScanned,
     this.onParsingFailed,
     this.precision = 3,
+    this.showFlashButton = false,
   });
 
   @override
@@ -60,7 +62,26 @@ class _PassportScannerWidgetState extends State<PassportScannerWidget> {
             previewFit: CameraPreviewFit.fitWidth,
             middleContentBuilder: (state) => Container(),
             bottomActionsBuilder: (state) => Container(),
-            topActionsBuilder: (state) => Container(),
+            topActionsBuilder: (state) => widget.showFlashButton ? Row(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: IconButton(
+                    icon: Icon(
+                      Icons.flashlight_on_rounded,
+                      color: Colors.white,
+                    ),
+                    onPressed: () {
+                      if (state.sensorConfig.flashMode == FlashMode.always) {
+                        state.sensorConfig.setFlashMode(FlashMode.none);
+                      } else {
+                        state.sensorConfig.setFlashMode(FlashMode.always);
+                      }
+                    },
+                  ),
+                ),
+              ],
+            ) : Container(),
             theme: AwesomeTheme(
               bottomActionsBackgroundColor: Colors.transparent,
             ),

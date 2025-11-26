@@ -48,7 +48,9 @@ class _MyHomePageState extends State<MyHomePage> {
                     builder: (context) => Scaffold(
                       appBar: AppBar(title: Text('Passport Scanner')),
                       body: PassportScannerWidget(
-                        onScanned: (result) {
+                        precision: 2,
+                        showFlashButton: true,
+                        onScanned: (result, imagePath) {
                           setState(() {
                             text =
                                 'Scanned: ${result.documentNumber}, ${result.givenNames} ${result.surnames}';
