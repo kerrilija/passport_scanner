@@ -12,6 +12,7 @@ class PassportScannerWidget extends StatefulWidget {
   final Function(MRZResult result, String? imagePath) onScanned;
   final Function(List<String> scannedLines)? onParsingFailed;
   final Function()? onNoMrzFound;
+  final Function(String rawText)? onRawText;
   final int precision;
   final bool showFlashButton;
 
@@ -20,6 +21,7 @@ class PassportScannerWidget extends StatefulWidget {
     required this.onScanned,
     this.onParsingFailed,
     this.onNoMrzFound,
+    this.onRawText,
     this.precision = 3,
     this.showFlashButton = false,
   });
@@ -27,6 +29,8 @@ class PassportScannerWidget extends StatefulWidget {
   @override
   State<PassportScannerWidget> createState() => _PassportScannerWidgetState();
 }
+
+const double kMrzZoneRatio = 0.45;
 
 class _PassportScannerWidgetState extends State<PassportScannerWidget> {
   final _textRecognizer = TextRecognizer(script: TextRecognitionScript.latin);
@@ -88,14 +92,14 @@ class _PassportScannerWidgetState extends State<PassportScannerWidget> {
               bottomActionsBackgroundColor: Colors.transparent,
             ),
             previewDecoratorBuilder: (state, preview) {
-              final scanArea = Rect.fromCenter(
-                center: preview.rect.center,
-                width: preview.rect.width * 0.9,
-                height: preview.rect.height * 0.5,
-              );
-              return Positioned.fill(
-                child: CustomPaint(
-                  painter: BarcodeFocusAreaPainter(scanArea: scanArea.size),
+              final cardWidth = preview.rect.width * 0.9;
+              final cardHeight = cardWidth / 1.586;
+              final scanArea = Size(cardWidth, cardHeight);
+              return CustomPaint(
+                size: Size.infinite,
+                painter: BarcodeFocusAreaPainter(
+                  scanArea: scanArea,
+                  mrzZoneRatio: kMrzZoneRatio,
                 ),
               );
             },
@@ -108,8 +112,8 @@ class _PassportScannerWidgetState extends State<PassportScannerWidget> {
   }
 
   Future _processImageMrz(AnalysisImage img) async {
-    if (_hasScannedSuccessfully) return; // already done
-    if (_isProcessingFrame) return; // drop frame if busy
+    if (_hasScannedSuccessfully) return;
+    if (_isProcessingFrame) return;
 
     _isProcessingFrame = true;
     try {
@@ -121,19 +125,61 @@ class _PassportScannerWidgetState extends State<PassportScannerWidget> {
       if (recognizedText.blocks.isEmpty) {
         widget.onNoMrzFound?.call();
         return;
-      };
+      }
 
-      final block = recognizedText.blocks.last;
-      if (block.lines.length != 2) return;
+      final imageHeight = img.height.toDouble();
+      final mrzZoneTop = imageHeight * kMrzZoneRatio;
 
-      final scannedLine1 = block.lines[0].text
-          .replaceAll(' ', '')
-          .replaceAll('«', '<');
-      final scannedLine2 = block.lines[1].text
-          .replaceAll(' ', '')
-          .replaceAll('«', '<');
+      final bottomBlocks = recognizedText.blocks.where((block) {
+        final blockTop = block.boundingBox.top;
+        return blockTop >= mrzZoneTop;
+      }).toList();
 
-      final mrz = [scannedLine1, scannedLine2];
+      if (bottomBlocks.isEmpty) return;
+
+      final allText = bottomBlocks.map((b) => b.text).join('\n');
+      widget.onRawText?.call(allText);
+
+      String cleanLine(String line) {
+        var cleaned = line
+            .replaceAll(' ', '')
+            .replaceAll('«', '<')
+            .replaceAll('‹', '<')
+            .replaceAll('›', '<')
+            .replaceAll('〈', '<')
+            .replaceAll('〉', '<')
+            .replaceAll('K<', '<<')
+            .replaceAll('<K', '<<')
+            .toUpperCase();
+        cleaned = cleaned.replaceAll(RegExp(r'[^A-Z0-9<]'), '');
+        return cleaned;
+      }
+
+      bool isMrzLine(String line) {
+        final cleaned = cleanLine(line);
+        if (cleaned.length < 28 || cleaned.length > 46) return false;
+        if (!cleaned.contains('<')) return false;
+        final validChars = RegExp(r'^[A-Z0-9<]+$');
+        return validChars.hasMatch(cleaned);
+      }
+
+      final List<String> mrzLines = [];
+      for (final block in bottomBlocks) {
+        for (final line in block.lines) {
+          if (isMrzLine(line.text)) {
+            mrzLines.add(cleanLine(line.text));
+          }
+        }
+      }
+
+      if (mrzLines.length < 2 || mrzLines.length > 3) return;
+
+      debugPrint('=== MRZ (bottom zone) ===');
+      for (final line in mrzLines) {
+        debugPrint('  $line (${line.length} chars)');
+      }
+
+      final mrz = mrzLines;
 
       try {
         final result = MRZParser.parse(mrz);
@@ -248,29 +294,58 @@ class _PassportScannerWidgetState extends State<PassportScannerWidget> {
 
 class BarcodeFocusAreaPainter extends CustomPainter {
   final Size scanArea;
+  final double mrzZoneRatio;
 
-  BarcodeFocusAreaPainter({required this.scanArea});
+  BarcodeFocusAreaPainter({
+    required this.scanArea,
+    this.mrzZoneRatio = kMrzZoneRatio,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
     final clippedRect = getClippedRect(size);
-    // Draw a semi-transparent overlay outside of the scan area
     canvas.drawPath(clippedRect, Paint()..color = Colors.black38);
-    // canvas.drawLine(
-    //   Offset(size.width / 2 - scanArea.width / 2, size.height / 2),
-    //   Offset(size.width / 2 + scanArea.width / 2, size.height / 2),
-    //   Paint()
-    //     ..color = Colors.red
-    //     ..strokeWidth = 2,
-    // );
-    // Add border around the scan area
-    canvas.drawPath(
-      getInnerRect(size),
+
+    final cardRect = getCardRect(size);
+
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(cardRect, const Radius.circular(16)),
       Paint()
         ..style = PaintingStyle.stroke
         ..color = Colors.white70
         ..strokeWidth = 3,
     );
+
+    final mrzHeight = cardRect.height * 0.35;
+    final mrzZoneRect = Rect.fromLTWH(
+      cardRect.left,
+      cardRect.bottom - mrzHeight,
+      cardRect.width,
+      mrzHeight,
+    );
+    canvas.drawRect(
+      mrzZoneRect,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..color = Colors.red.withOpacity(0.8)
+        ..strokeWidth = 2,
+    );
+
+    final labelPaint = Paint()
+      ..color = Colors.red.withOpacity(0.6);
+    canvas.drawRect(
+      Rect.fromLTWH(mrzZoneRect.left + 5, mrzZoneRect.top + 5, 80, 20),
+      labelPaint,
+    );
+    final textPainter = TextPainter(
+      text: const TextSpan(
+        text: 'MRZ ZONE',
+        style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
+      ),
+      textDirection: TextDirection.ltr,
+    );
+    textPainter.layout();
+    textPainter.paint(canvas, Offset(mrzZoneRect.left + 10, mrzZoneRect.top + 8));
 
     // We apply the canvas transformation to the canvas so that the barcode
     // rect is drawn in the correct orientation. (Android only)
@@ -280,25 +355,22 @@ class BarcodeFocusAreaPainter extends CustomPainter {
     // }
   }
 
-  Path getInnerRect(Size size) {
-    return Path()..addRRect(
-      RRect.fromRectAndRadius(
-        Rect.fromLTWH(
-          (size.width - scanArea.width) / 2,
-          (size.height - scanArea.height) / 3,
-          scanArea.width,
-          scanArea.height,
-        ),
-        const Radius.circular(16),
-      ),
+  Rect getCardRect(Size size) {
+    return Rect.fromLTWH(
+      (size.width - scanArea.width) / 2,
+      (size.height - scanArea.height) / 2.5,
+      scanArea.width,
+      scanArea.height,
     );
   }
 
   Path getClippedRect(Size size) {
     final fullRect = Path()
       ..addRect(Rect.fromLTWH(0, 0, size.width, size.height));
-    final innerRect = getInnerRect(size);
-    // Substract innerRect from fullRect
+    final cardRect = getCardRect(size);
+    final innerRect = Path()..addRRect(
+      RRect.fromRectAndRadius(cardRect, const Radius.circular(16)),
+    );
     return Path.combine(PathOperation.difference, fullRect, innerRect);
   }
 
