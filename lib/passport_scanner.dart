@@ -8,13 +8,20 @@ import 'package:path_provider/path_provider.dart';
 import 'ml_kit_utils.dart';
 import 'package:image/image.dart' as imglib;
 
+enum TorchButtonPosition { topLeft, topRight, bottomLeft, bottomRight }
+
 class PassportScannerWidget extends StatefulWidget {
   final Function(MRZResult result, String? imagePath) onScanned;
   final Function(List<String> scannedLines)? onParsingFailed;
   final Function()? onNoMrzFound;
   final Function(String rawText)? onRawText;
+  final Function(bool hasGlare)? onGlareDetected;
   final int precision;
   final bool showFlashButton;
+  final bool autoReduceExposureOnGlare;
+  final String? glareWarningText;
+  final Widget Function(bool isOn, VoidCallback onToggle)? torchButtonBuilder;
+  final TorchButtonPosition torchButtonPosition;
 
   const PassportScannerWidget({
     super.key,
@@ -22,8 +29,13 @@ class PassportScannerWidget extends StatefulWidget {
     this.onParsingFailed,
     this.onNoMrzFound,
     this.onRawText,
+    this.onGlareDetected,
     this.precision = 3,
     this.showFlashButton = false,
+    this.autoReduceExposureOnGlare = true,
+    this.glareWarningText,
+    this.torchButtonBuilder,
+    this.torchButtonPosition = TorchButtonPosition.topLeft,
   });
 
   @override
@@ -41,6 +53,10 @@ class _PassportScannerWidgetState extends State<PassportScannerWidget> {
   bool _hasScannedSuccessfully = false;
   Map<MRZResult, int> results = {};
   String? savedImagePath;
+  bool _hasGlare = false;
+  bool _exposureReduced = false;
+  bool _torchOn = false;
+  CameraState? _cameraState;
 
   @override
   void dispose() {
@@ -66,28 +82,12 @@ class _PassportScannerWidgetState extends State<PassportScannerWidget> {
               aspectRatio: CameraAspectRatios.ratio_4_3,
             ),
             previewFit: CameraPreviewFit.fitWidth,
-            middleContentBuilder: (state) => Container(),
+            middleContentBuilder: (state) {
+              _cameraState = state;
+              return Container();
+            },
             bottomActionsBuilder: (state) => Container(),
-            topActionsBuilder: (state) => widget.showFlashButton ? Row(
-              children: [
-                Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: IconButton(
-                    icon: Icon(
-                      Icons.flashlight_on_rounded,
-                      color: Colors.white,
-                    ),
-                    onPressed: () {
-                      if (state.sensorConfig.flashMode == FlashMode.always) {
-                        state.sensorConfig.setFlashMode(FlashMode.none);
-                      } else {
-                        state.sensorConfig.setFlashMode(FlashMode.always);
-                      }
-                    },
-                  ),
-                ),
-              ],
-            ) : Container(),
+            topActionsBuilder: (state) => Container(),
             theme: AwesomeTheme(
               bottomActionsBackgroundColor: Colors.transparent,
             ),
@@ -107,8 +107,156 @@ class _PassportScannerWidgetState extends State<PassportScannerWidget> {
             saveConfig: SaveConfig.photo(),
           ),
         ),
+        if (_hasGlare)
+          Positioned(
+            top: 100,
+            left: 20,
+            right: 20,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              decoration: BoxDecoration(
+                color: Colors.orange.withValues(alpha: 0.9),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.wb_sunny, color: Colors.white),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      widget.glareWarningText ?? 'Previše svjetla - nagnite karticu',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        if (widget.showFlashButton)
+          Positioned(
+            top: widget.torchButtonPosition == TorchButtonPosition.topLeft ||
+                    widget.torchButtonPosition == TorchButtonPosition.topRight
+                ? 16
+                : null,
+            bottom: widget.torchButtonPosition == TorchButtonPosition.bottomLeft ||
+                    widget.torchButtonPosition == TorchButtonPosition.bottomRight
+                ? 16
+                : null,
+            left: widget.torchButtonPosition == TorchButtonPosition.topLeft ||
+                    widget.torchButtonPosition == TorchButtonPosition.bottomLeft
+                ? 16
+                : null,
+            right: widget.torchButtonPosition == TorchButtonPosition.topRight ||
+                    widget.torchButtonPosition == TorchButtonPosition.bottomRight
+                ? 16
+                : null,
+            child: widget.torchButtonBuilder != null
+                ? widget.torchButtonBuilder!(_torchOn, _toggleTorch)
+                : _buildDefaultTorchButton(),
+          ),
       ],
     );
+  }
+
+  Widget _buildDefaultTorchButton() {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.black45,
+        borderRadius: BorderRadius.circular(25),
+      ),
+      child: IconButton(
+        icon: Icon(
+          _torchOn ? Icons.flashlight_off : Icons.flashlight_on,
+          color: _torchOn ? Colors.yellow : Colors.white,
+        ),
+        onPressed: _toggleTorch,
+      ),
+    );
+  }
+
+  void _toggleTorch() {
+    if (_cameraState == null) return;
+    try {
+      if (_torchOn) {
+        _cameraState!.sensorConfig.setFlashMode(FlashMode.none);
+      } else {
+        _cameraState!.sensorConfig.setFlashMode(FlashMode.always);
+      }
+      setState(() => _torchOn = !_torchOn);
+    } catch (e) {
+      debugPrint('Torch toggle error: $e');
+    }
+  }
+
+  bool _detectGlare(AnalysisImage img) {
+    try {
+      final bytes = img.when(
+        nv21: (image) => image.bytes,
+        bgra8888: (image) => image.bytes,
+      );
+      if (bytes == null) return false;
+
+      final height = img.height;
+      final width = img.width;
+      final mrzStartY = (height * kMrzZoneRatio).toInt();
+
+      int brightPixels = 0;
+      int totalPixels = 0;
+
+      final isNv21 = img.when(nv21: (_) => true, bgra8888: (_) => false) ?? false;
+
+      for (int y = mrzStartY; y < height; y += 4) {
+        for (int x = 0; x < width; x += 4) {
+          int brightness;
+          if (isNv21) {
+            brightness = bytes[y * width + x] & 0xff;
+          } else {
+            final i = (y * width + x) * 4;
+            if (i + 2 < bytes.length) {
+              final b = bytes[i] & 0xff;
+              final g = bytes[i + 1] & 0xff;
+              final r = bytes[i + 2] & 0xff;
+              brightness = ((r + g + b) / 3).round();
+            } else {
+              continue;
+            }
+          }
+
+          totalPixels++;
+          if (brightness > 240) {
+            brightPixels++;
+          }
+        }
+      }
+
+      final glareRatio = totalPixels > 0 ? brightPixels / totalPixels : 0.0;
+      return glareRatio > 0.15;
+    } catch (e) {
+      debugPrint('Glare detection error: $e');
+      return false;
+    }
+  }
+
+  void _adjustExposureForGlare(bool hasGlare) {
+    if (_cameraState == null || !widget.autoReduceExposureOnGlare) return;
+
+    try {
+      if (hasGlare && !_exposureReduced) {
+        _cameraState!.sensorConfig.setBrightness(0.3);
+        _exposureReduced = true;
+        debugPrint('Brightness reduced due to glare');
+      } else if (!hasGlare && _exposureReduced) {
+        _cameraState!.sensorConfig.setBrightness(0.5);
+        _exposureReduced = false;
+        debugPrint('Brightness reset');
+      }
+    } catch (e) {
+      debugPrint('Brightness adjustment error: $e');
+    }
   }
 
   Future _processImageMrz(AnalysisImage img) async {
@@ -117,6 +265,13 @@ class _PassportScannerWidgetState extends State<PassportScannerWidget> {
 
     _isProcessingFrame = true;
     try {
+      final glareDetected = _detectGlare(img);
+      if (glareDetected != _hasGlare) {
+        setState(() => _hasGlare = glareDetected);
+        widget.onGlareDetected?.call(glareDetected);
+        _adjustExposureForGlare(glareDetected);
+      }
+
       final inputImage = img.toInputImage();
       final RecognizedText recognizedText = await _textRecognizer.processImage(
         inputImage,
@@ -238,18 +393,21 @@ class _PassportScannerWidgetState extends State<PassportScannerWidget> {
               int R = (298 * C + 409 * E + 128) >> 8;
               int G = (298 * C - 100 * D - 208 * E + 128) >> 8;
               int B = (298 * C + 516 * D + 128) >> 8;
-              if (R < 0)
+              if (R < 0) {
                 R = 0;
-              else if (R > 255)
+              } else if (R > 255) {
                 R = 255;
-              if (G < 0)
+              }
+              if (G < 0) {
                 G = 0;
-              else if (G > 255)
+              } else if (G > 255) {
                 G = 255;
-              if (B < 0)
+              }
+              if (B < 0) {
                 B = 0;
-              else if (B > 255)
+              } else if (B > 255) {
                 B = 255;
+              }
               rgbImage.setPixelRgb(x, y, R, G, B);
             }
           }
@@ -327,12 +485,12 @@ class BarcodeFocusAreaPainter extends CustomPainter {
       mrzZoneRect,
       Paint()
         ..style = PaintingStyle.stroke
-        ..color = Colors.red.withOpacity(0.8)
+        ..color = Colors.red.withValues(alpha: 0.8)
         ..strokeWidth = 2,
     );
 
     final labelPaint = Paint()
-      ..color = Colors.red.withOpacity(0.6);
+      ..color = Colors.red.withValues(alpha: 0.6);
     canvas.drawRect(
       Rect.fromLTWH(mrzZoneRect.left + 5, mrzZoneRect.top + 5, 80, 20),
       labelPaint,
